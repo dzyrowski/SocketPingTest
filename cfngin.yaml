@@ -1,0 +1,14 @@
+namespace: ${environment}
+cfngin_bucket: ${environment}-cfngin-us-east-1 #CFNGIN Bucket in tools account.
+
+stacks:
+
+  - name: SocketPingTest-alert-${environment}
+    enabled: ${enabled}
+    template_path: templates/socketpingtest.yaml
+    variables:
+      HookUrl: ${HookUrl}
+      TagEnvironment: ${TagEnvironment}
+      TagOwner: ${TagOwner}
+      SocketPingTestFuntionName: ${SocketPingTestFuntionName}
+      TriggerTime: ${TriggerTime}
