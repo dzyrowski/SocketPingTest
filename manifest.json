@@ -1,0 +1,6 @@
+{
+    "manifest": [
+      {"host":"www.google.com","port":"443","env":"dev","description":"google-success"},
+      {"host":"www.google.com","port":"111","env":"dev","description":"google-fail"}
+    ]
+}
