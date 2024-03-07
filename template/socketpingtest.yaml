@@ -1,0 +1,217 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  HookUrl:
+    Type: String
+  TagEnvironment:
+    Type: String
+  TagOwner:
+    Type: String
+  SocketPingTestFuntionName: 
+    Type: String
+  TriggerTime:
+    Type: String
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SocketTestPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+                - Effect: Allow
+                  Resource: "*"
+                  Action:
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                    - xray:PutTraceSegments
+                    - xray:PutTelemetryRecords
+                - Effect: Allow
+                  Action:
+                    - sts:AssumeRole
+                  Resource: "*"
+                - Effect: Allow
+                  Action:
+                   - s3:GetObject
+                   - s3:ListBucket
+                  Resource:
+                   - !Sub 'arn:aws:s3:::socketpingtest-${AWS::AccountId}/*'
+                   - !Sub 'arn:aws:s3:::socketpingtest-${AWS::AccountId}'
+  S3LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SocketPingTestFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:aws:s3:::socketpingtest-${AWS::AccountId}"
+    DependsOn:
+      - SocketPingTestFunction
+
+  SocketPingTestFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          import os
+          import http.client
+          import boto3
+          import socket
+          
+          s3 = boto3.client('s3')
+          
+          from urllib.request import Request, urlopen
+          from urllib.error import URLError, HTTPError  
+                     
+          def get_aws_account_id():
+            client = boto3.client('sts')
+            response = client.get_caller_identity()
+            return response['Account']
+
+          def lambda_handler(event, context):
+            aws_account_id = get_aws_account_id()
+            print(aws_account_id)
+    
+            bucket_name = f'socketpingtest-{aws_account_id}'
+            object_key = 'manifest.json'
+          
+            # Read the JSON object from S3
+            response = s3.get_object(Bucket=bucket_name, Key=object_key)
+            data = json.loads(response['Body'].read())
+            print(data)
+            
+            # Iterate through each manifest item
+            for item in data.get("manifest", []):
+              host = item.get("host")
+              port = item.get("port")
+              env  = item.get("env")
+              description = item.get("description")
+              print (host)
+                 
+              # Perform socket test
+              s = socket.socket()
+              s.settimeout(1)
+              try:
+                  s.connect((host, int(port)))
+                  print("Success connecting" )
+              except:
+                  print("Timed out connecting" )
+              
+              
+              # Send Teams message for timed out connection
+              HookUrl = os.environ.get('HookUrl')
+              message = {
+                "@context": "https://schema.org/extensions",
+                "@type": "MessageCard",
+                "themeColor": "#FF0000",
+                "title": "SocketPingTest",
+                "text": f"A connectivity test against Host: {host}, Port: {port} failed. More details below...",
+                "sections": [
+                    {
+                        "facts": [
+                            {
+                                "name": "Account",
+                                "value": f'{aws_account_id}'
+                            },
+                            {
+                                "name": "Host:",
+                               "value": f"{host}"
+                            },
+                            {
+                                "name": "Port",
+                               "value": f"{port}"
+                           },
+                            {
+                                "name": "Description",
+                               "value": f'{description}'
+                            }
+                        ]
+                   }
+                ]
+            }
+
+            message_json = json.dumps(message).encode('utf-8')
+            req = Request(HookUrl, data=message_json, headers={'Content-Type': 'application/json'}, method='POST')
+          
+            try:
+              teamsresponse = urlopen(req)
+              teamsresponse.read()
+              logger.info("Message posted")
+              print("Teams message sent")
+            except HTTPError as e:
+              print(f"Request failed: {e.code} {e.reason}")
+            except URLError as e:
+              print(f"Server connection failed: {e.reason}")
+            except Exception as e:
+              print(f"Socket error: {str(e)}")
+            finally:
+              s.close()
+        
+                       
+      Handler: index.lambda_handler
+      FunctionName: !Ref SocketPingTestFuntionName
+      Runtime: python3.11
+      TracingConfig:
+        Mode: Active
+      Timeout: 60
+      Role: !GetAtt 'LambdaRole.Arn'
+      Environment:
+        Variables:
+          S3BucketName: !Sub socketpingtest-${AWS::AccountId}
+          HookUrl: !Ref HookUrl
+
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref 'SocketPingTestFunction'
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt 'EventRule.Arn'
+    
+  EventRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: Event rule to trigger Lambda every 15 minutes
+      Name: EventRule
+      ScheduleExpression: !Sub "rate(${TriggerTime} minutes)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt 'SocketPingTestFunction.Arn'
+          Id: SocketPingTestFunction
+
+  S3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub socketpingtest-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Function: !GetAtt SocketPingTestFunction.Arn
+            Event: 's3:ObjectCreated:*'
+      Tags:
+        - Key: Owner
+          Value: !Ref TagOwner
+        - Key: Environment
+          Value: !Ref TagEnvironment
+Outputs:
+  SocketPingTestFuntionArn:
+    Value: !GetAtt SocketPingTestFunction.Arn
+ 
+ 
